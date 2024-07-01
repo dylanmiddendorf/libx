@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: BSD-2-Clause
  */
 
+/* TODO: Finish doxygen comments for relevent functions */
+/* TODO: Add logging framework for debugging and warnings */
+/* TODO: Shift scp_set capacities from powers of two towards primes */
+/* TODO: Shift hashing algorithms from djb2 towards crc32 */
+
 #include "strpool.h"
 
 #include <errno.h>
@@ -12,10 +17,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* TODO: Finish doxygen comments for relevent functions */
-/* TODO: Add logging framework for debugging and warnings */
-/* TODO: Shift scp_set capacities from powers of two towards primes */
-/* TODO: Shift hashing algorithms from djb2 towards crc32 */
+struct _scp_bucket
+{
+  const char *key;
+
+  uint32_t hash;
+  uint32_t next;
+};
 
 #define SCP_DEFAULT_INITIAL_CAPACITY 16
 
@@ -23,31 +31,6 @@
 #define SCP_SET_DEFAULT_INITIAL_CAPACITY 16
 #define SCP_SET_DEFAULT_CELLAR_RATIO 0.14
 #define SCP_SET_DEFAULT_LOAD_FACTOR 0.68
-
-typedef struct _scp_bucket
-{
-  const char *key;
-
-  uint32_t hash;
-  uint32_t next;
-} scp_bucket_t;
-
-typedef struct _scp_set
-{
-  scp_bucket_t *table;
-
-  uint32_t capacity;
-  uint32_t table_capacity;
-  uint32_t cellar_capacity;
-
-  uint32_t size; /* Number of active entries in whole map (table & cellar) */
-  uint32_t cellar_size; /* Number of active entries in strictly in cellar */
-
-  float load_factor;
-  float cellar_ratio;
-
-  bool _dynamic;
-} scp_set_t;
 
 static void scp_ensure_capacity (strpool_t *pool, uint32_t min);
 static uint32_t scp_new_capacity (strpool_t *pool, uint32_t min_capacity);
@@ -82,7 +65,7 @@ static uint32_t _scp_set_djb2 (const char *s);
  * arguments.
  * @param ... Optional arguments corresponding to the format string.
  */
-_Noreturn static void
+static void
 _die (const char *fmt, ...)
 {
   va_list arg;
@@ -116,7 +99,8 @@ scp_init (strpool_t *pool)
   if (!pool) /* Ensure that the pool is properly allocated */
     pool = scp_new ();
 
-  pool->index = _scp_set_init (NULL);
+  pool->index._dynamic = false;
+  _scp_set_init (&pool->index);
 
   pool->capacity = SCP_DEFAULT_INITIAL_CAPACITY;
   pool->pool = malloc (pool->capacity);
@@ -129,7 +113,7 @@ scp_init (strpool_t *pool)
 void
 scp_free (strpool_t *pool)
 {
-  _scp_set_free (pool->index);
+  _scp_set_free (&pool->index);
 
   if (pool->pool)
     free (pool->pool);
@@ -140,21 +124,21 @@ scp_free (strpool_t *pool)
 }
 
 const char *
-scp_insert_string (strpool_t *pool, char *s)
+scp_insert_string (strpool_t *pool, const char *s)
 {
   uint32_t str_len;
-  const char *pooled_str = _scp_set_get (pool->index, s);
+  const char *pooled_str = _scp_set_get (&pool->index, s);
 
   /* If the string pool doesn't contain the string, insert the string */
   if (!pooled_str)
     {
       /* Cache string length to prevent repeat calls */
-      str_len = strnlen (s, UINT32_MAX);
+      str_len = strlen (s);
       scp_ensure_capacity (pool, pool->size + str_len);
 
       strcpy (pool->pool + pool->size, s);
       pool->pool[pool->size + str_len] = '\0';
-      _scp_set_add (pool->index, pool->pool + pool->size);
+      _scp_set_add (&pool->index, pool->pool + pool->size);
 
       pool->size += str_len + 1; /* Null terminator */
     }
@@ -162,35 +146,29 @@ scp_insert_string (strpool_t *pool, char *s)
   return pooled_str;
 }
 
-void
-scp_insert_string_len (strpool_t *pool, char *str, size_t n)
+const char *
+scp_insert_string_len (strpool_t *pool, const char *str, size_t n)
 {
+  (void) pool, (void) str, (void) n;
+  return NULL;
 }
 
-void
-scp_insert_string_range (strpool_t *pool, char *str, size_t from, size_t to)
+inline uint32_t scp_size (strpool_t *pool)
 {
-}
-
-inline size_t
-scp_size (strpool_t *pool)
-{
-  return pool->index->size;
+  return pool->index.size;
 }
 
 inline size_t
 scp_memory_usage (strpool_t *pool)
 {
-  size_t table_size = (sizeof (*pool->index->table) * pool->index->size);
-  size_t set_size = table_size + sizeof (*pool->index);
-
-  return (pool->capacity + sizeof (*pool)) + set_size;
+  size_t table_size = (sizeof (*pool->index.table) * pool->index.size);
+  return (pool->capacity + sizeof (*pool)) + table_size;
 }
 
 static void
 scp_ensure_capacity (strpool_t *pool, uint32_t min_capacity)
 {
-  if(min_capacity < pool->capacity)
+  if (min_capacity < pool->capacity)
     return;
   uint32_t new_capacity = scp_new_capacity (pool, min_capacity);
   pool->pool = realloc (pool->pool, new_capacity);
@@ -223,7 +201,7 @@ _scp_set_new ()
   return set;
 }
 
-static inline scp_set_t *
+static scp_set_t *
 _scp_set_init (scp_set_t *set)
 {
   /* Prevent duplicate code by initalizing with library defaults */
@@ -343,7 +321,7 @@ _scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
   if (!set || !s) /* Loosely check for null pointer exceptions */
     return NULL;
 
-  if (set->size > (set->capacity * set->load_factor))
+  if (set->size > (set->capacity * set->load_factor) && create)
     return _scp_bucket_find (_scp_set_rehash (set), s, create, rflags);
 
   hash = _scp_set_djb2 (s);
@@ -379,7 +357,7 @@ _scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
   if (set->cellar_size < set->cellar_capacity)
     {
       /* (--set->cellar_size) -- maximal-munch principle */
-      next = set->table + (set->capacity - (--set->cellar_size));
+      next = set->table + (set->capacity - (++set->cellar_size));
       goto bucket_init;
     }
 
@@ -406,9 +384,16 @@ _scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
 
 bucket_init:
   set->size++; /* Increase size for rehashing... */
-  chain->key = s, chain->hash = hash;
-  if (next) /* Only expand the chain if `next` is valid */
-    chain->next = next - set->table;
+
+  if (next)
+    { /* Only expand the chain if `next` is valid */
+      next->key = s, next->hash = hash;
+      chain->next = next - set->table;
+    }
+  else
+    {
+      chain->key = s, chain->hash = hash;
+    }
 
   if (rflags)
     *rflags |= 0x01;
@@ -429,7 +414,7 @@ bucket_init:
 static inline bool
 _scp_bucket_is_empty (scp_bucket_t *bucket)
 {
-  return !bucket->key && bucket->next == -1;
+  return !bucket->key && bucket->next == -1U;
 }
 
 static uint32_t
