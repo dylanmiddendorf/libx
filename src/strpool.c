@@ -32,8 +32,8 @@ struct _scp_bucket
 #define SCP_SET_DEFAULT_CELLAR_RATIO 0.14
 #define SCP_SET_DEFAULT_LOAD_FACTOR 0.68
 
-static void scp_ensure_capacity (strpool_t *pool, uint32_t min);
-static uint32_t scp_new_capacity (strpool_t *pool, uint32_t min_capacity);
+static void scp_ensure_capacity (strpool_t *pool, size_t min);
+static size_t scp_new_capacity (strpool_t *pool, size_t min_capacity);
 
 static scp_set_t *_scp_set_new ();
 static scp_set_t *_scp_set_init (scp_set_t *index);
@@ -42,17 +42,17 @@ static scp_set_t *_scp_set_init_custom (scp_set_t *set, uint32_t capacity,
 static void _scp_set_free (scp_set_t *set);
 
 static inline bool _scp_set_add (scp_set_t *set, const char *s);
-static inline bool _scp_set_contains (scp_set_t *set, const char *s);
-static inline const char *_scp_set_get (scp_set_t *set, const char *s);
+static inline bool _scp_set_contains (scp_set_t *set, const char *s, size_t n);
+static inline const char *_scp_set_get (scp_set_t *set, const char *s, size_t n);
 static inline bool _scp_set_is_empty (scp_set_t *set);
 
 static scp_set_t *_scp_set_rehash (scp_set_t *set);
-static scp_bucket_t *_scp_bucket_find (scp_set_t *set, const char *s,
+static scp_bucket_t *_scp_bucket_find (scp_set_t *set, const char *s, size_t n,
                                        bool create, int *rflags);
 static inline bool _scp_bucket_is_empty (scp_bucket_t *bucket);
 
 /* Source: http://www.cse.yorku.ca/~oz/hash.html */
-static uint32_t _scp_set_djb2 (const char *s);
+static uint32_t _scp_set_djb2 (const char *s, size_t n);
 
 /**
  * @brief Terminates the program execution due to a critical exception.
@@ -126,17 +126,24 @@ scp_free (strpool_t *pool)
 const char *
 scp_insert_string (strpool_t *pool, const char *s)
 {
+  return scp_insert_string_len(pool, s, -1UL);
+}
+
+const char *
+scp_insert_string_len (strpool_t *pool, const char *s, size_t n)
+{
   uint32_t str_len;
-  const char *pooled_str = _scp_set_get (&pool->index, s);
+  const char *pooled_str = _scp_set_get (&pool->index, s, n);
 
   /* If the string pool doesn't contain the string, insert the string */
   if (!pooled_str)
     {
       /* Cache string length to prevent repeat calls */
-      str_len = strlen (s);
+      str_len = n == -1UL ? strlen (s) : n;
+      
       scp_ensure_capacity (pool, pool->size + str_len);
 
-      strcpy (pool->pool + pool->size, s);
+      strncpy (pool->pool + pool->size, s, str_len);
       pool->pool[pool->size + str_len] = '\0';
       _scp_set_add (&pool->index, pool->pool + pool->size);
 
@@ -146,14 +153,8 @@ scp_insert_string (strpool_t *pool, const char *s)
   return pooled_str;
 }
 
-const char *
-scp_insert_string_len (strpool_t *pool, const char *str, size_t n)
-{
-  (void) pool, (void) str, (void) n;
-  return NULL;
-}
-
-inline uint32_t scp_size (strpool_t *pool)
+inline uint32_t
+scp_size (strpool_t *pool)
 {
   return pool->index.size;
 }
@@ -166,26 +167,26 @@ scp_memory_usage (strpool_t *pool)
 }
 
 static void
-scp_ensure_capacity (strpool_t *pool, uint32_t min_capacity)
+scp_ensure_capacity (strpool_t *pool, size_t min_capacity)
 {
   if (min_capacity < pool->capacity)
     return;
-  uint32_t new_capacity = scp_new_capacity (pool, min_capacity);
+  size_t new_capacity = scp_new_capacity (pool, min_capacity);
   pool->pool = realloc (pool->pool, new_capacity);
   if (!pool->pool)
     _die ("%s: Unable to allocate pool->pool (errno=%d)", __func__, errno);
 }
 
-static uint32_t
-scp_new_capacity (strpool_t *pool, uint32_t min_capacity)
+static size_t
+scp_new_capacity (strpool_t *pool, size_t min_capacity)
 {
-  uint32_t old_capacity = pool->capacity;
-  uint32_t new_capacity = (old_capacity << 1) + 2;
+  size_t old_capacity = pool->capacity;
+  size_t new_capacity = (old_capacity << 1) + 2UL;
 
   if (min_capacity < old_capacity)
     _die ("%s: String pool capacity has overflowed.", __func__);
   if (new_capacity < old_capacity)
-    return UINT32_MAX; /* Prevent overflow by capping the capacity */
+    return SIZE_MAX; /* Prevent overflow by capping the capacity */
 
   return new_capacity > min_capacity ? new_capacity : min_capacity;
 }
@@ -264,20 +265,21 @@ static inline bool
 _scp_set_add (scp_set_t *set, const char *s)
 {
   int rflags; /* Used to determine if a bucket was added */
-  _scp_bucket_find (set, s, true, &rflags); /* Attempt to create the bucket */
+  _scp_bucket_find (set, s, -1UL, true,
+                    &rflags); /* Attempt to create the bucket */
   return rflags & 0x01;
 }
 
 static inline bool
-_scp_set_contains (scp_set_t *set, const char *s)
+_scp_set_contains (scp_set_t *set, const char *s, size_t n)
 {
-  return _scp_bucket_find (set, s, false, NULL) == NULL;
+  return _scp_bucket_find (set, s, n, false, NULL) == NULL;
 }
 
 static inline const char *
-_scp_set_get (scp_set_t *set, const char *s)
+_scp_set_get (scp_set_t *set, const char *s, size_t n)
 {
-  scp_bucket_t *b = _scp_bucket_find (set, s, false, NULL);
+  scp_bucket_t *b = _scp_bucket_find (set, s, n, false, NULL);
   return b ? b->key : NULL;
 }
 
@@ -308,7 +310,8 @@ _scp_set_rehash (scp_set_t *set)
 }
 
 static scp_bucket_t *
-_scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
+_scp_bucket_find (scp_set_t *set, const char *s, size_t n, bool create,
+                  int *rflags)
 {
   uint32_t hash;
   /* The variable `chain` is utilized primarily for searching for buckets
@@ -322,16 +325,16 @@ _scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
     return NULL;
 
   if (set->size > (set->capacity * set->load_factor) && create)
-    return _scp_bucket_find (_scp_set_rehash (set), s, create, rflags);
+    return _scp_bucket_find (_scp_set_rehash (set), s, create, n, rflags);
 
-  hash = _scp_set_djb2 (s);
+  hash = _scp_set_djb2 (s, n);
   chain = set->table + (hash % set->table_capacity);
   if (!_scp_bucket_is_empty (chain))
     {
       while (true)
         {
           /* The requested key exists (and was found) */
-          if (hash == chain->hash && strcmp (s, chain->key) == 0)
+          if (hash == chain->hash && strncmp (s, chain->key, n) == 0)
             {
               if (rflags)
                 *rflags &= ~0x01;
@@ -379,7 +382,7 @@ _scp_bucket_find (scp_set_t *set, const char *s, bool create, int *rflags)
                __func__, set->load_factor);
 
       set->load_factor = SCP_SET_DEFAULT_LOAD_FACTOR;
-      return _scp_bucket_find (_scp_set_rehash (set), s, create, rflags);
+      return _scp_bucket_find (_scp_set_rehash (set), s, create, n, rflags);
     }
 
 bucket_init:
@@ -418,14 +421,14 @@ _scp_bucket_is_empty (scp_bucket_t *bucket)
 }
 
 static uint32_t
-_scp_set_djb2 (const char *s)
+_scp_set_djb2 (const char *s, size_t n)
 {
   uint32_t hash = 5381U;
   char c; /* Used to store the current character */
   if (!s) /* Defend against pesky null pointers */
     return 0U;
 
-  while ((c = *s++))
+  for (size_t i = 0UL; (c = *s++) && i < n; ++i)
     hash = ((hash << 5) + hash) + c; /* hash * 33 + c */
   return hash;
 }

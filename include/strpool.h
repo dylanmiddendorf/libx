@@ -41,8 +41,8 @@ typedef struct _strpool
   scp_set_t index;
   char *pool;
 
-  uint32_t capacity;
-  uint32_t size;
+  size_t capacity;
+  size_t size;
 
   /* This field serves as a safeguard for de-allocation. Specifically, it is
    set within the `scp_new(...)` function to indicate dynamic allocation.
@@ -58,7 +58,7 @@ void scp_free (strpool_t *pool);
 
 /* ----- String Pool Insertion Functions ------ */
 const char *scp_insert_string (strpool_t *pool, const char *s);
-const char *scp_insert_string_len (strpool_t *pool, const char *str, size_t n);
+const char *scp_insert_string_len (strpool_t *pool, const char *s, size_t n);
 
 /* ----- String Pool Diagnostic Functions ----- */
 uint32_t scp_size (strpool_t *pool);
